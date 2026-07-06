@@ -1,0 +1,18 @@
+{
+  "name": "downloads-organizer",
+  "version": "2.0.0",
+  "private": true,
+  "description": "npm command runner for the macOS Downloads Organizer (launchd agent + read-only dashboard).",
+  "scripts": {
+    "run": "bash \"$HOME/bin/organize-downloads.sh\"",
+    "logs": "tail -n 80 -f \"$HOME/Library/Logs/organize-downloads.log\"",
+    "status": "launchctl print gui/$(id -u)/local.organize-downloads 2>/dev/null | grep 'state =' || echo 'not loaded'; echo \"Downloads top-level file count: $(find \"$HOME/Downloads\" -maxdepth 1 -mindepth 1 | wc -l | tr -d ' ')\"",
+    "load": "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/local.organize-downloads.plist\" && echo loaded",
+    "unload": "launchctl bootout gui/$(id -u)/local.organize-downloads && echo unloaded",
+    "reload": "launchctl bootout gui/$(id -u)/local.organize-downloads 2>/dev/null; launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/local.organize-downloads.plist\" && echo reloaded",
+    "install": "bash ./install.sh",
+    "uninstall": "bash ./install.sh uninstall",
+    "dashboard": "python3 dashboard.py",
+    "open": "open http://localhost:8770"
+  }
+}

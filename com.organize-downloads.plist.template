@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd agent TEMPLATE for the Downloads Organizer.
+
+     install.sh renders this file (substituting the placeholders below) into
+     ~/Library/LaunchAgents/local.organize-downloads.plist and loads it with
+     `launchctl bootstrap gui/<uid>`. Do not load this template directly.
+
+     Placeholders replaced at install time:
+       __LABEL__  ->  launchd label (local.organize-downloads)
+       __HOME__   ->  the installing user's $HOME (absolute paths only)
+       __REPO__   ->  absolute path to the cloned repo
+
+     The agent runs the OrganizeDownloads.app applet (which shell-execs
+     ~/bin/organize-downloads.sh) whenever ~/Downloads changes, plus a periodic
+     fallback sweep. See keys below for the exact triggers. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <!-- The executable launchd runs: the compiled AppleScript applet inside
+         OrganizeDownloads.app. Pointing at the .app (rather than calling the
+         shell script directly) lets macOS attribute Files-and-Folders /
+         Full-Disk-Access prompts to "OrganizeDownloads" instead of "osascript". -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/OrganizeDownloads.app/Contents/MacOS/applet</string>
+    </array>
+
+    <!-- Primary trigger: run whenever the contents of ~/Downloads change
+         (a new file lands, a download completes, etc.). -->
+    <key>WatchPaths</key>
+    <array>
+        <string>__HOME__/Downloads</string>
+    </array>
+
+    <!-- Coalesce bursts: wait >=10s between launches so a flurry of file
+         events doesn't spawn many back-to-back runs. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Fallback trigger: also run every 300s (5 min) in case a change event
+         was missed (e.g. the Mac was asleep when the file arrived). -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/organize-downloads.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/organize-downloads.err</string>
+
+    <!-- 0077 in decimal (63). Any file the launcher creates is not readable by
+         group/other. Log files may still need chmod on first run because macOS
+         creates them before the Umask applies. -->
+    <key>Umask</key>
+    <integer>63</integer>
+
+    <!-- Pin a minimal, fixed PATH so the worker resolves system tools
+         (mv, stat, mkdir, date) predictably and ignores any user PATH. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Low-priority background job (Background = throttled I/O/CPU). -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
