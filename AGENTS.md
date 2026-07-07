@@ -73,9 +73,9 @@ tail ~/Library/Logs/organize-downloads.log
 ```
 
 Drop a test file (any `.pdf` / `.png`) into `~/Downloads` and watch the log;
-the file should move into the matching subfolder within ~10s. Note the worker
-ignores files modified in the last 5 seconds, so a just-created test file is
-picked up on the next trigger.
+the file should usually move on the next watcher-triggered run. Note the
+worker ignores files modified in the last 5 seconds, so a just-created test
+file may wait for the next trigger or the 5-minute fallback sweep.
 
 ## Permission prompt walkthrough (tell the user)
 
@@ -177,6 +177,8 @@ folder access (or Full Disk Access) on first run.
    `launchctl print gui/$(id -u)/local.organize-downloads` should show the
    service.
 5. Add a file to `~/Downloads`; within ~10s the log should record the run.
+   A too-fresh file may instead wait for the next trigger or the 5-minute
+   fallback sweep because of the 5-second mtime grace period.
 6. Run the adversarial verification script in `SECURITY.md`.
 
 ## Constraints

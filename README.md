@@ -49,8 +49,10 @@ enable **Downloads Folder**.
 ## Use
 
 Drop files in `~/Downloads`. They move into the matching subfolder within
-about 10 seconds. Stray directories are gathered into `Folders/`, files with
-no extension into `Other/`.
+seconds when the file-system watcher catches them; if a file is still inside
+the script's 5-second safety window, the 5-minute fallback sweep picks it up.
+Stray directories are gathered into `Folders/`, files with no extension into
+`Other/`.
 
 ```bash
 ./install.sh run          # manual sweep now
@@ -58,8 +60,8 @@ no extension into `Other/`.
 tail -f ~/Library/Logs/organize-downloads.log
 ```
 
-npm wrappers exist for the same things: `npm run run | status | logs |
-load | unload | reload | dashboard`.
+npm wrappers exist for the same things: `npm run setup | teardown | run |
+status | logs | load | unload | reload | dashboard`.
 
 ## Customize: your own folders and rules
 

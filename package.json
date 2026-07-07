@@ -10,8 +10,8 @@
     "load": "launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/local.organize-downloads.plist\" && echo loaded",
     "unload": "launchctl bootout gui/$(id -u)/local.organize-downloads && echo unloaded",
     "reload": "launchctl bootout gui/$(id -u)/local.organize-downloads 2>/dev/null; launchctl bootstrap gui/$(id -u) \"$HOME/Library/LaunchAgents/local.organize-downloads.plist\" && echo reloaded",
-    "install": "bash ./install.sh",
-    "uninstall": "bash ./install.sh uninstall",
+    "setup": "bash ./install.sh",
+    "teardown": "bash ./install.sh uninstall",
     "dashboard": "python3 dashboard.py",
     "open": "open http://localhost:8770"
   }

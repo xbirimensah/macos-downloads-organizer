@@ -86,6 +86,10 @@ if [ ! -t 1 ]; then
      && [ "$(stat -f %z -- "$LOG_FILE" 2>/dev/null || echo 0)" -gt 5242880 ]; then
     mv -f -- "$LOG_FILE" "$LOG_FILE.old" 2>/dev/null || true
   fi
+  if [ -f "$ERR_FILE" ] && [ ! -L "$ERR_FILE" ] \
+     && [ "$(stat -f %z -- "$ERR_FILE" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f -- "$ERR_FILE" "$ERR_FILE.old" 2>/dev/null || true
+  fi
   exec >>"$LOG_FILE" 2>>"$ERR_FILE"
 fi
 
@@ -124,6 +128,10 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   fi
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+refresh_lock() {
+  touch -c -- "$LOCK_DIR" 2>/dev/null || true
+}
 
 # ---------------------------------------------------------------------------
 # Rules engine (bash 3.2 compatible: no associative arrays).
@@ -324,7 +332,7 @@ ensure_category() {
 }
 
 # Make unmatched globs expand to nothing rather than the literal pattern.
-shopt -s nullglob 2>/dev/null || setopt NULL_GLOB 2>/dev/null
+shopt -s nullglob
 
 # ---------------------------------------------------------------------------
 # Prune compat symlinks. Only symlinks THIS script plausibly created are
@@ -361,21 +369,65 @@ prune_compat_links
 # at the original path so browser "Open" / "Show in Finder" buttons that
 # remember the old path still resolve.
 move_one() {
-  local dest="$1" f="$2" target
-  if [ -e "$dest/$f" ]; then
+  local dest="$1" f="$2" target moved=0
+  if [ -e "$dest/$f" ] || [ -L "$dest/$f" ]; then
     target="dup_$(date +%s)_$f"
-    mv -n -- "$f" "$dest/$target" || { log "mv failed: $f"; return 1; }
-    log "moved (dup): $f -> $dest/"
   else
     target="$f"
-    mv -n -- "$f" "$dest/$target" || { log "mv failed: $f"; return 1; }
+  fi
+  mv -n -- "$f" "$dest/$target" || { log "mv failed: $f"; return 1; }
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    moved=1
+  elif [ "$target" = "$f" ]; then
+    target="dup_$(date +%s)_$f"
+    mv -n -- "$f" "$dest/$target" || { log "mv retry failed: $f"; return 1; }
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      moved=1
+    fi
+  fi
+  if [ "$moved" -ne 1 ]; then
+    log "skip: move declined for $f"
+    return 1
+  fi
+  if [ "$target" = "$f" ]; then
     log "moved: $f -> $dest/"
+  else
+    log "moved (dup): $f -> $dest/"
   fi
   if [ "$COMPAT_LINKS" = "on" ] && [ ! -e "$f" ] && [ ! -L "$f" ]; then
     if ln -s -- "$dest/$target" "$f" 2>/dev/null; then
       chflags -h hidden "./$f" 2>/dev/null || true
       log "compat link: $f -> $dest/$target"
     fi
+  fi
+  return 0
+}
+
+move_dir_one() {
+  local dest="$1" name="$2" target moved=0
+  if [ -e "$dest/$name" ] || [ -L "$dest/$name" ]; then
+    target="dup_$(date +%s)_$name"
+  else
+    target="$name"
+  fi
+  mv -n -- "$name" "$dest/$target" || { log "mv dir failed: $name"; return 1; }
+  if [ ! -e "$name" ] && [ ! -L "$name" ]; then
+    moved=1
+  elif [ "$target" = "$name" ]; then
+    target="dup_$(date +%s)_$name"
+    mv -n -- "$name" "$dest/$target" || { log "mv dir retry failed: $name"; return 1; }
+    if [ ! -e "$name" ] && [ ! -L "$name" ]; then
+      moved=1
+    fi
+  fi
+  if [ "$moved" -ne 1 ]; then
+    log "skip: directory move declined for $name"
+    return 1
+  fi
+  if [ "$target" = "$name" ]; then
+    log "moved dir: $name -> $dest/"
+  else
+    log "moved dir (dup): $name -> $dest/"
   fi
   return 0
 }
@@ -413,11 +465,12 @@ EOF
 #      extension (report.stl -> STL/), or OTHER_CAT for extensionless files
 now_epoch="$(date +%s)"
 for f in *; do
+  refresh_lock
   [ -e "$f" ] || continue
   [ -L "$f" ] && continue          # compat links and foreign symlinks alike
   [ -f "$f" ] || continue          # directories handled by the sweep below
   case "$f" in
-    *.crdownload|*.part|*.download|*.tmp|.*) continue ;;
+    *.crdownload|*.part|*.download|*.tmp) continue ;;
   esac
   # Grace period: a file modified in the last 5s may still be being written
   # by an app that does not use a temp-name convention.
@@ -454,6 +507,7 @@ done
 # dynamic). Directory symlinks are skipped (never followed).
 if ensure_category "Folders"; then
   for d in */; do
+    refresh_lock
     name="${d%/}"
     is_protected "$name" && continue
     [ -L "$name" ] && { log "skip dir symlink: $name"; continue; }
@@ -464,13 +518,7 @@ if ensure_category "Folders"; then
     if [ "$(( $(date +%s) - mtime ))" -lt 5 ]; then
       continue
     fi
-    if [ -e "Folders/$name" ]; then
-      mv -n -- "$name" "Folders/dup_$(date +%s)_$name" \
-        && log "moved dir (dup): $name -> Folders/"
-    else
-      mv -n -- "$name" "Folders/" \
-        && log "moved dir: $name -> Folders/"
-    fi
+    move_dir_one "Folders" "$name"
   done
 else
   log "skip: Folders/ not a safe destination"

@@ -22,6 +22,7 @@ import subprocess
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import splitport
 
 # ---------------------------------------------------------------------------
 # Configuration / facts about the organizer
@@ -180,11 +181,17 @@ def _read_recent_moves(limit=50):
     except OSError:
         return [], None
 
-    # Read the tail of the file cheaply: read whole file but cap memory by
-    # only keeping the last ~4000 lines. Logs here are small, so this is fine.
     try:
-        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
+        with open(LOG_FILE, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            read_from = max(0, size - 262144)
+            if read_from:
+                fh.seek(read_from)
+                fh.readline()
+            else:
+                fh.seek(0)
+            lines = fh.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return [], None
 
@@ -445,6 +452,22 @@ setInterval(poll,3000);
 class Handler(BaseHTTPRequestHandler):
     server_version = "DownloadsOrganizerDash/1.0"
 
+    def _host_allowed(self):
+        host = self.headers.get("Host", "")
+        if not host:
+            return False
+        hostname, port = splitport(host)
+        if hostname is None:
+            hostname = host
+        if hostname.startswith("[") and hostname.endswith("]"):
+            hostname = hostname[1:-1]
+        hostname = hostname.lower()
+        if hostname not in {"localhost", "127.0.0.1"}:
+            return False
+        if port is None:
+            return True
+        return port.isdigit()
+
     def _send(self, code, body, ctype):
         if isinstance(body, str):
             body = body.encode("utf-8")
@@ -457,6 +480,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
+        if not self._host_allowed():
+            self._send(403, '{"error":"forbidden"}', "application/json; charset=utf-8")
+            return
         path = self.path.split("?", 1)[0]
         if path == "/":
             self._send(200, INDEX_HTML, "text/html; charset=utf-8")
@@ -482,7 +508,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(os.environ.get("PORT", DEFAULT_PORT))
+    try:
+        port = int(os.environ.get("PORT", DEFAULT_PORT))
+    except (TypeError, ValueError):
+        print(f"Invalid PORT value; falling back to {DEFAULT_PORT}")
+        port = DEFAULT_PORT
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Downloads Organizer dashboard (read-only) on http://127.0.0.1:{port}")
     print(f"  downloads: {DOWNLOADS_DIR}")

@@ -34,10 +34,13 @@ APP="$HOME/Applications/OrganizeDownloads.app"    # applet launchd actually runs
 # Substitute the __LABEL__/__HOME__/__REPO__ placeholders in the plist template
 # and emit the result on stdout (caller redirects it to DEST).
 render_plist() {
+  local escaped_home escaped_repo
+  escaped_home="$(printf '%s' "$HOME" | sed 's/[&|\\]/\\&/g')"
+  escaped_repo="$(printf '%s' "$REPO" | sed 's/[&|\\]/\\&/g')"
   sed \
     -e "s|__LABEL__|$LABEL|g" \
-    -e "s|__HOME__|$HOME|g" \
-    -e "s|__REPO__|$REPO|g" \
+    -e "s|__HOME__|$escaped_home|g" \
+    -e "s|__REPO__|$escaped_repo|g" \
     "$TEMPLATE"
 }
 
