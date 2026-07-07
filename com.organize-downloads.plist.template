@@ -45,11 +45,14 @@
     <key>StartInterval</key>
     <integer>300</integer>
 
+    <!-- Separate from the worker's own rotated organize-downloads.log: launchd
+         keeps this fd open across the worker's mv-based rotation, so sharing
+         the file would leave launchd writing to the rotated-away inode. -->
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/organize-downloads.log</string>
+    <string>__HOME__/Library/Logs/organize-downloads-applet.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/organize-downloads.err</string>
+    <string>__HOME__/Library/Logs/organize-downloads-applet.err</string>
 
     <!-- 0077 in decimal (63). Any file the launcher creates is not readable by
          group/other. Log files may still need chmod on first run because macOS
