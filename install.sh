@@ -28,7 +28,7 @@ DEST="$DEST_DIR/$LABEL.plist"             # rendered (path-substituted) plist
 TEMPLATE="$REPO/com.organize-downloads.plist.template"  # source plist w/ __TOKENS__
 
 BIN="$HOME/bin/organize-downloads.sh"             # installed worker copy
-APP="$HOME/Applications/OrganizeDownloads.app"    # applet launchd actually runs
+APP="$HOME/Applications/OrganizeDownloads.app"    # FDA holder launchd runs (hidden)
 
 # render_plist
 # Substitute the __LABEL__/__HOME__/__REPO__ placeholders in the plist template

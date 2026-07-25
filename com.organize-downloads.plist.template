@@ -10,23 +10,43 @@
        __HOME__   ->  the installing user's $HOME (absolute paths only)
        __REPO__   ->  absolute path to the cloned repo
 
-     The agent runs the OrganizeDownloads.app applet (which shell-execs
-     ~/bin/organize-downloads.sh) whenever ~/Downloads changes, plus a periodic
-     fallback sweep. See keys below for the exact triggers. -->
+     The agent launches OrganizeDownloads.app (hidden, in the background)
+     whenever ~/Downloads changes, plus an hourly fallback sweep and an
+     immediate sweep at load time (RunAtLoad). The applet is the Full-Disk-
+     Access holder: macOS attributes Downloads-folder access to the signed
+     app bundle, not to a bare /bin/bash, so routing through it is what lets
+     launchd-triggered runs actually see and move files. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>__LABEL__</string>
 
-    <!-- The executable launchd runs: the compiled AppleScript applet inside
-         OrganizeDownloads.app. Pointing at the .app (rather than calling the
-         shell script directly) lets macOS attribute Files-and-Folders /
-         Full-Disk-Access prompts to "OrganizeDownloads" instead of "osascript". -->
+    <!-- Launch the applet HIDDEN and in the BACKGROUND via `open`:
+           -g  do not bring the app to the foreground (no focus stealing)
+           -j  launch it hidden
+         Running the worker as a bare /bin/bash job (a previous iteration) has
+         no Full Disk Access, so launchd-triggered runs silently saw an empty
+         ~/Downloads and moved nothing. Going through the FDA-granted app fixes
+         that; -g -j keeps it from popping to the foreground the way a plain
+         GUI launch did. `open` returns immediately, so launchd is not blocked;
+         the applet runs the worker and quits. -->
     <key>ProgramArguments</key>
     <array>
-        <string>__HOME__/Applications/OrganizeDownloads.app/Contents/MacOS/applet</string>
+        <string>/usr/bin/open</string>
+        <string>-g</string>
+        <string>-j</string>
+        <string>__HOME__/Applications/OrganizeDownloads.app</string>
     </array>
+
+    <!-- Self-heal: run one full reconcile sweep every time the agent is
+         (re)loaded - login, reboot, reinstall, or manual reload. The worker
+         is idempotent and sweeps ALL top-level files each run, so a launch
+         after any downtime catches up on whatever piled up while it was dead.
+         Combined with WatchPaths + the hourly fallback, the queue can never
+         stay dirty across a relaunch. -->
+    <key>RunAtLoad</key>
+    <true/>
 
     <!-- Primary trigger: run whenever the contents of ~/Downloads change
          (a new file lands, a download completes, etc.). -->
@@ -40,10 +60,10 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
-    <!-- Fallback trigger: also run every 300s (5 min) in case a change event
-         was missed (e.g. the Mac was asleep when the file arrived). -->
+    <!-- Fallback trigger: run hourly in case a change event was missed (for
+         example when the Mac was asleep). The watcher handles normal activity. -->
     <key>StartInterval</key>
-    <integer>300</integer>
+    <integer>3600</integer>
 
     <!-- Separate from the worker's own rotated organize-downloads.log: launchd
          keeps this fd open across the worker's mv-based rotation, so sharing

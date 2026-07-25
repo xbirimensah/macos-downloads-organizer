@@ -2,7 +2,7 @@
 
 Tiny macOS utility that sorts new files in `~/Downloads` into typed subfolders
 (`Images/`, `PDFs/`, `Videos/`, `Archives/`, ...) as they land. Runs on
-file-system change via launchd, with a 5-minute fallback sweep. Nothing you
+file-system change via launchd, with an hourly fallback sweep. Nothing you
 downloaded is ever deleted; name collisions are renamed `dup_<epoch>_<orig>`.
 
 Highlights:
@@ -50,7 +50,7 @@ enable **Downloads Folder**.
 
 Drop files in `~/Downloads`. They move into the matching subfolder within
 seconds when the file-system watcher catches them; if a file is still inside
-the script's 5-second safety window, the 5-minute fallback sweep picks it up.
+the script's 5-second safety window, the hourly fallback sweep picks it up.
 Stray directories are gathered into `Folders/`, files with no extension into
 `Other/`.
 
