@@ -44,6 +44,26 @@ render_plist() {
     "$TEMPLATE"
 }
 
+# harden_applet <app-bundle>
+# Force the applet's startup screen off. With OSAAppletShowStartupScreen set
+# (Script Editor's "Startup Screen" checkbox), every launch pops a modal
+# "Press Run to run this script, or Quit to quit" dialog and the applet blocks
+# until someone clicks Run - which makes an unattended launchd agent useless.
+# Idempotent, and a no-op when the flag is already false so it does not
+# needlessly re-sign the bundle (re-signing changes the cdhash, which resets
+# the app's Full Disk Access grant and makes macOS re-prompt).
+harden_applet() {
+  local app="$1" plist="$1/Contents/Info.plist" current
+  [ -f "$plist" ] || return 0
+  current="$(plutil -extract OSAAppletShowStartupScreen raw "$plist" 2>/dev/null || echo missing)"
+  [ "$current" = "false" ] && return 0
+  plutil -replace OSAAppletShowStartupScreen -bool false "$plist"
+  # The edit invalidates the ad-hoc signature osacompile applied; re-sign so
+  # the bundle stays valid on disk and keeps satisfying its designated req.
+  codesign --force --sign - "$app" >/dev/null 2>&1 || true
+  echo "disabled applet startup screen on $app"
+}
+
 # Subcommand dispatch (defaults to "install" when no argument is given).
 case "${1:-install}" in
   install)
@@ -90,8 +110,14 @@ do shell script "$BIN"
 EOF
       rm -rf "$APP"
       osacompile -o "$APP" "$tmpdir/OrganizeDownloads.applescript"
+      harden_applet "$APP"
       echo "compiled $APP"
     else
+      # Re-assert the no-startup-screen flag even on the keep path: a bundle
+      # exported from Script Editor (or an older install) can carry it set, and
+      # that turns every unattended launchd run into a blocking "Press Run to
+      # run this script" dialog.
+      harden_applet "$APP"
       echo "kept existing $APP (already wraps $BIN)"
     fi
 
