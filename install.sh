@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
-# Install/uninstall the Downloads Organizer launchd agent + AppleScript applet.
+# Install/uninstall the Downloads Organizer launchd agent + Swift watcher app.
 # Portable: detects the repo path it was run from, templates paths into the
-# launchd plist, compiles the .app wrapper with osacompile, and loads launchd.
+# launchd plist, builds and signs the .app, and loads launchd.
 #
-# Usage: ./install.sh {install|uninstall|status|run}   (default: install)
+# Usage: ./install.sh {install|uninstall|status|run|identity}  (default: install)
 #
 # What `install` puts on disk (all per-user, no sudo/root):
 #   ~/bin/organize-downloads.sh ............. copy of the worker script (0700)
-#   ~/Applications/OrganizeDownloads.app .... AppleScript applet wrapping it
+#   ~/Applications/OrganizeDownloads.app .... persistent Swift watcher agent
 #   ~/Library/LaunchAgents/local.organize-downloads.plist
 #                                            ... launchd agent (paths templated)
-#   ~/Library/Logs/organize-downloads.{log,err} ... created on first run
+#   ~/Library/Logs/organize-downloads{,-agent}.log ... created on first run
+#
+# WHY THE APP IS A SIGNED SWIFT BUNDLE, NOT AN APPLESCRIPT APPLET
+# The applet this replaced had no CFBundleIdentifier, so macOS could not map its
+# executable back to its bundle ("attributed bundle: (null)" in the tccd log).
+# TCC then keyed every grant to the executable's FILE PATH instead of an app
+# identity, which meant the Full Disk Access checkbox the user had ticked -
+# stored against the .app path - was never consulted, and the app fell back to
+# per-folder consent prompts forever. Two properties fix that permanently:
+#
+#   1. CFBundleIdentifier  -> TCC keys grants to the bundle ID (client_type 0)
+#                             rather than a fragile filesystem path.
+#   2. A stable signing identity -> the designated requirement becomes
+#                             `identifier "..." and certificate root = H"..."`
+#                             with NO cdhash, so grants survive every rebuild.
+#                             Ad-hoc signing pins a cdhash, so each rebuild
+#                             silently invalidated the grant and re-prompted.
 #
 # IMPORTANT - path baking: the rendered plist hard-codes absolute $HOME paths,
 # and ~/bin/organize-downloads.sh is a COPY (not a symlink) of the repo script.
@@ -29,6 +45,10 @@ TEMPLATE="$REPO/com.organize-downloads.plist.template"  # source plist w/ __TOKE
 
 BIN="$HOME/bin/organize-downloads.sh"             # installed worker copy
 APP="$HOME/Applications/OrganizeDownloads.app"    # FDA holder launchd runs (hidden)
+AGENT_SRC="$REPO/agent"                           # Swift sources + build.sh
+BUNDLE_ID="local.organize-downloads"              # must match agent/build.sh
+SIGN_IDENTITY="${SIGN_IDENTITY:-Obiri Local Code Signing}"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 # render_plist
 # Substitute the __LABEL__/__HOME__/__REPO__ placeholders in the plist template
@@ -44,24 +64,64 @@ render_plist() {
     "$TEMPLATE"
 }
 
-# harden_applet <app-bundle>
-# Force the applet's startup screen off. With OSAAppletShowStartupScreen set
-# (Script Editor's "Startup Screen" checkbox), every launch pops a modal
-# "Press Run to run this script, or Quit to quit" dialog and the applet blocks
-# until someone clicks Run - which makes an unattended launchd agent useless.
-# Idempotent, and a no-op when the flag is already false so it does not
-# needlessly re-sign the bundle (re-signing changes the cdhash, which resets
-# the app's Full Disk Access grant and makes macOS re-prompt).
-harden_applet() {
-  local app="$1" plist="$1/Contents/Info.plist" current
-  [ -f "$plist" ] || return 0
-  current="$(plutil -extract OSAAppletShowStartupScreen raw "$plist" 2>/dev/null || echo missing)"
-  [ "$current" = "false" ] && return 0
-  plutil -replace OSAAppletShowStartupScreen -bool false "$plist"
-  # The edit invalidates the ad-hoc signature osacompile applied; re-sign so
-  # the bundle stays valid on disk and keeps satisfying its designated req.
-  codesign --force --sign - "$app" >/dev/null 2>&1 || true
-  echo "disabled applet startup screen on $app"
+# ensure_identity
+# Make sure a code-signing identity named $SIGN_IDENTITY exists in the login
+# keychain, creating a self-signed one if not.
+#
+# This is the single most important part of the install. TCC records a grant
+# together with the app's designated requirement. Signed with a stable cert the
+# requirement is `identifier "..." and certificate root = H"..."`, which every
+# future rebuild still satisfies. Signed ad-hoc it is a bare cdhash, so every
+# rebuild produces a "different app" and macOS starts prompting again.
+#
+# No Apple Developer account is needed - the cert never leaves this machine and
+# is only ever used to give the bundle a stable identity.
+ensure_identity() {
+  if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_IDENTITY"; then
+    return 0
+  fi
+
+  echo "creating self-signed code-signing identity: $SIGN_IDENTITY"
+  local tmp
+  tmp="$(mktemp -d)"
+
+  cat >"$tmp/openssl.cnf" <<EOF
+[ req ]
+distinguished_name = dn
+x509_extensions    = v3
+prompt             = no
+[ dn ]
+CN = $SIGN_IDENTITY
+O  = Local Development
+[ v3 ]
+basicConstraints     = critical,CA:false
+keyUsage             = critical,digitalSignature
+extendedKeyUsage     = critical,codeSigning
+subjectKeyIdentifier = hash
+EOF
+
+  openssl req -new -x509 -newkey rsa:2048 -nodes -sha256 -days 7300 \
+    -keyout "$tmp/key.pem" -out "$tmp/cert.pem" -config "$tmp/openssl.cnf" >/dev/null 2>&1
+
+  # macOS's PKCS12 reader rejects OpenSSL 3's modern defaults, so force the
+  # legacy PBE algorithms it can actually parse.
+  openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" \
+    -out "$tmp/identity.p12" -passout pass:temp -name "$SIGN_IDENTITY" \
+    -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 >/dev/null 2>&1
+
+  security import "$tmp/identity.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
+    -P temp -T /usr/bin/codesign -T /usr/bin/security -A >/dev/null
+
+  # Trust it for code signing at the USER level only; this needs no sudo and no
+  # GUI authorization, unlike adding it to the System keychain.
+  security add-trusted-cert -r trustRoot -p codeSign \
+    -k "$HOME/Library/Keychains/login.keychain-db" "$tmp/cert.pem"
+
+  rm -rf "$tmp"
+
+  security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_IDENTITY" \
+    || { echo "failed to create signing identity"; exit 1; }
+  echo "identity created"
 }
 
 # Subcommand dispatch (defaults to "install" when no argument is given).
@@ -92,34 +152,23 @@ case "${1:-install}" in
       echo "seeded $CONF_DIR/rules.conf"
     fi
 
-    # Compile a tiny AppleScript applet that wraps the shell script. The .app
-    # wrapper exists so macOS can attribute Full Disk / Downloads-folder access
-    # to "OrganizeDownloads" instead of "osascript".
-    #
-    # Only (re)compile when the applet is missing or points elsewhere:
-    # replacing the bundle resets its TCC grant and macOS would re-prompt for
-    # Downloads access. The applet body never changes otherwise (it is a
-    # single `do shell script` line; the worker logic lives in $BIN).
-    if [ ! -x "$APP/Contents/MacOS/applet" ] \
-       || ! osadecompile "$APP/Contents/Resources/Scripts/main.scpt" 2>/dev/null \
-            | grep -qF "do shell script \"$BIN\""; then
-      tmpdir="$(mktemp -d)"
-      trap 'rm -rf "$tmpdir"' EXIT
-      cat >"$tmpdir/OrganizeDownloads.applescript" <<EOF
-do shell script "$BIN"
-EOF
-      rm -rf "$APP"
-      osacompile -o "$APP" "$tmpdir/OrganizeDownloads.applescript"
-      harden_applet "$APP"
-      echo "compiled $APP"
-    else
-      # Re-assert the no-startup-screen flag even on the keep path: a bundle
-      # exported from Script Editor (or an older install) can carry it set, and
-      # that turns every unattended launchd run into a blocking "Press Run to
-      # run this script" dialog.
-      harden_applet "$APP"
-      echo "kept existing $APP (already wraps $BIN)"
-    fi
+    # Build and install the watcher app. Unlike the old applet, rebuilding is
+    # cheap and safe: the signing identity is stable, so the designated
+    # requirement does not change and the existing TCC grants keep matching.
+    ensure_identity
+    SIGN_IDENTITY="$SIGN_IDENTITY" "$AGENT_SRC/build.sh" "$AGENT_SRC/build"
+
+    # Stop the running agent before swapping the bundle underneath it.
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+
+    rm -rf "$APP"
+    cp -R "$AGENT_SRC/build/OrganizeDownloads.app" "$APP"
+
+    # Register with LaunchServices so TCC can resolve the executable back to
+    # its bundle. Without a registration the attribution falls back to the
+    # executable path, which is the exact failure this rewrite removes.
+    "$LSREGISTER" -f "$APP"
+    echo "installed $APP"
 
     # Render the plist with this machine's paths, then (re)load it into the
     # per-user GUI launchd domain. bootout first so a re-install replaces any
@@ -132,19 +181,33 @@ EOF
     # Bootstrap: ensure ~/Downloads exists and pre-create category folders so
     # the user sees a fully organized layout immediately, without waiting for
     # the first file event to fire the launchd job.
-    if [ ! -e "$HOME/Downloads" ]; then
-      mkdir -m 0700 -- "$HOME/Downloads"
-      echo "created $HOME/Downloads"
+    # Seed category folders now rather than waiting for the first file event.
+    # Resolve the target the same way the worker does, so an install on a
+    # machine pointed at an external volume does not silently seed ~/Downloads.
+    TARGET_FILE="$HOME/.config/organize-downloads/target"
+    if [ -n "${ORGANIZE_DL:-}" ]; then
+      TARGET="$ORGANIZE_DL"
+    elif [ -s "$TARGET_FILE" ]; then
+      TARGET="$(tr -d '\n' <"$TARGET_FILE")"
+    else
+      TARGET="$HOME/Downloads"
+      [ -e "$TARGET" ] || { mkdir -m 0700 -- "$TARGET"; echo "created $TARGET"; }
     fi
-    if [ -d "$HOME/Downloads" ] && [ ! -L "$HOME/Downloads" ]; then
-      "$BIN" || true
-      echo "bootstrapped category folders in ~/Downloads"
+    if [ -d "$TARGET" ] && [ ! -L "$TARGET" ]; then
+      ORGANIZE_DL="$TARGET" "$BIN" || true
+      echo "bootstrapped category folders in $TARGET"
+    else
+      echo "target not present, skipping bootstrap: $TARGET"
     fi
 
     echo
-    echo "on first run macOS may prompt for access to your Downloads folder."
-    echo "grant it in System Settings -> Privacy & Security -> Files and Folders."
-    echo "logs: ~/Library/Logs/organize-downloads.log  /  .err"
+    echo "FIRST INSTALL ONLY: grant Full Disk Access to $APP"
+    echo "  System Settings -> Privacy & Security -> Full Disk Access -> +"
+    echo "Later rebuilds keep the grant (stable signing identity), so this is"
+    echo "a one-time step. If an OLD entry for this app is already listed,"
+    echo "remove it with - first: it is bound to a signature that no longer exists."
+    echo "logs: ~/Library/Logs/organize-downloads.log (worker)"
+    echo "      ~/Library/Logs/organize-downloads-agent.log (watcher)"
     ;;
   uninstall)
     # Unload the agent and remove the files install put on disk. Deliberately
@@ -153,6 +216,7 @@ EOF
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
     rm -f "$DEST" "$BIN"
     rm -rf "$APP"
+    "$LSREGISTER" -u "$APP" 2>/dev/null || true
     echo "uninstalled $LABEL (the Downloads folder and its subfolders are left untouched)"
     ;;
   status)
@@ -164,8 +228,13 @@ EOF
     # `install` (it execs ~/bin/organize-downloads.sh, not the repo copy).
     exec "$BIN"
     ;;
+  identity)
+    # Create the signing identity without doing a full install.
+    ensure_identity
+    security find-identity -v -p codesigning | grep -F "$SIGN_IDENTITY" || true
+    ;;
   *)
-    echo "usage: $0 {install|uninstall|status|run}"
+    echo "usage: $0 {install|uninstall|status|run|identity}"
     exit 1
     ;;
 esac

@@ -1,95 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- launchd agent TEMPLATE for the Downloads Organizer.
-
-     install.sh renders this file (substituting the placeholders below) into
-     ~/Library/LaunchAgents/local.organize-downloads.plist and loads it with
-     `launchctl bootstrap gui/<uid>`. Do not load this template directly.
-
-     Placeholders replaced at install time:
-       __LABEL__  ->  launchd label (local.organize-downloads)
-       __HOME__   ->  the installing user's $HOME (absolute paths only)
-       __REPO__   ->  absolute path to the cloned repo
-
-     The agent launches OrganizeDownloads.app (hidden, in the background)
-     whenever ~/Downloads changes, plus an hourly fallback sweep and an
-     immediate sweep at load time (RunAtLoad). The applet is the Full-Disk-
-     Access holder: macOS attributes Downloads-folder access to the signed
-     app bundle, not to a bare /bin/bash, so routing through it is what lets
-     launchd-triggered runs actually see and move files. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the Downloads Organizer.
+
+  The app is a PERSISTENT agent: it owns its own FSEvents watcher, its debounce
+  timer and its periodic sweep, so launchd's only job is to keep one process
+  alive. Deliberately absent:
+
+    WatchPaths    - the app watches the target itself, and re-arms the watcher
+                    when a removable volume is ejected and remounted. launchd's
+                    WatchPaths cannot follow a target that comes and goes.
+    StartInterval - relaunching every 60s meant ~1440 short-lived processes a
+                    day, each a fresh TCC subject re-running the full
+                    authorization check. That is what turned a single missing
+                    permission into an endless prompt loop. One long-lived
+                    process negotiates TCC once, at launch.
+-->
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>__LABEL__</string>
+	<key>Label</key>
+	<string>__LABEL__</string>
 
-    <!-- Launch the applet HIDDEN and in the BACKGROUND via `open`:
-           -g  do not bring the app to the foreground (no focus stealing)
-           -j  launch it hidden
-         Running the worker as a bare /bin/bash job (a previous iteration) has
-         no Full Disk Access, so launchd-triggered runs silently saw an empty
-         ~/Downloads and moved nothing. Going through the FDA-granted app fixes
-         that; -g -j keeps it from popping to the foreground the way a plain
-         GUI launch did. `open` returns immediately, so launchd is not blocked;
-         the applet runs the worker and quits. -->
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/open</string>
-        <string>-g</string>
-        <string>-j</string>
-        <string>__HOME__/Applications/OrganizeDownloads.app</string>
-    </array>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/Applications/OrganizeDownloads.app/Contents/MacOS/OrganizeDownloads</string>
+	</array>
 
-    <!-- Self-heal: run one full reconcile sweep every time the agent is
-         (re)loaded - login, reboot, reinstall, or manual reload. The worker
-         is idempotent and sweeps ALL top-level files each run, so a launch
-         after any downtime catches up on whatever piled up while it was dead.
-         Combined with WatchPaths + the hourly fallback, the queue can never
-         stay dirty across a relaunch. -->
-    <key>RunAtLoad</key>
-    <true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
 
-    <!-- Primary trigger: run whenever the contents of ~/Downloads change
-         (a new file lands, a download completes, etc.). -->
-    <key>WatchPaths</key>
-    <array>
-        <string>__HOME__/Downloads</string>
-    </array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
 
-    <!-- Coalesce bursts: wait >=10s between launches so a flurry of file
-         events doesn't spawn many back-to-back runs. -->
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-
-    <!-- Fallback trigger: run hourly in case a change event was missed (for
-         example when the Mac was asleep). The watcher handles normal activity. -->
-    <key>StartInterval</key>
-    <integer>3600</integer>
-
-    <!-- Separate from the worker's own rotated organize-downloads.log: launchd
-         keeps this fd open across the worker's mv-based rotation, so sharing
-         the file would leave launchd writing to the rotated-away inode. -->
-    <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/organize-downloads-applet.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/organize-downloads-applet.err</string>
-
-    <!-- 0077 in decimal (63). Any file the launcher creates is not readable by
-         group/other. Log files may still need chmod on first run because macOS
-         creates them before the Umask applies. -->
-    <key>Umask</key>
-    <integer>63</integer>
-
-    <!-- Pin a minimal, fixed PATH so the worker resolves system tools
-         (mv, stat, mkdir, date) predictably and ignores any user PATH. -->
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-
-    <!-- Low-priority background job (Background = throttled I/O/CPU). -->
-    <key>ProcessType</key>
-    <string>Background</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/organize-downloads-agent.err</string>
 </dict>
 </plist>
