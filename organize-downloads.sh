@@ -65,7 +65,25 @@ set -u
 # Restrict permissions on everything we create (category dirs, lock, state).
 umask 077
 
-DL="$HOME/Downloads"                                    # the folder we organize
+# The folder we organize. Resolution order, first match wins:
+#   1. $ORGANIZE_DL                       - one-off override for a manual run
+#   2. ~/.config/organize-downloads/target - the persistent choice
+#   3. ~/Downloads                        - default
+# Browsers can be pointed at an external volume, so the target is not
+# necessarily inside $HOME and must not be assumed to be.
+DL_TARGET_FILE="$HOME/.config/organize-downloads/target"
+if [ -n "${ORGANIZE_DL:-}" ]; then
+  DL="$ORGANIZE_DL"
+elif [ -s "$DL_TARGET_FILE" ]; then
+  DL="$(tr -d '\r\n' <"$DL_TARGET_FILE")"
+else
+  DL="$HOME/Downloads"
+fi
+
+# ORGANIZE_SKIP_DIRS=1 disables the stray-folder sweep. Needed when pointing
+# the worker at a folder that already has a deliberate subfolder layout of its
+# own (~/Documents, say), which the sweep would otherwise rake into Folders/.
+SKIP_DIRS="${ORGANIZE_SKIP_DIRS:-0}"
 LOCK_DIR="$HOME/Library/Caches/organize-downloads.lock" # single-instance lock
 UID_ME="$(id -u)"                                       # current user's numeric UID
 
@@ -110,6 +128,10 @@ if [ "$(stat -f %u -- "$DL" 2>/dev/null)" != "$UID_ME" ]; then
   log "abort: \$DL not owned by current user"
   exit 0
 fi
+
+# ORGANIZE_COMPAT=off skips the browser-compat symlinks for this run. Applied
+# after the rules file is read so an explicit env override still wins.
+COMPAT_OVERRIDE="${ORGANIZE_COMPAT:-}"
 
 # ---------------------------------------------------------------------------
 # Single-instance lock. mkdir is atomic on every POSIX FS, so a successful
@@ -300,6 +322,14 @@ is_protected() {
   done
   return 1
 }
+
+case "$COMPAT_OVERRIDE" in
+  on|off) COMPAT_LINKS="$COMPAT_OVERRIDE" ;;
+  '') ;;
+  *) log "rules: bad ORGANIZE_COMPAT value '$COMPAT_OVERRIDE'" ;;
+esac
+
+log "target: $DL (skip_dirs=$SKIP_DIRS compat_links=$COMPAT_LINKS)"
 
 cd -- "$DL" || { log "abort: cd $DL failed"; exit 0; }
 
@@ -505,7 +535,9 @@ done
 # Stray-folder sweep: move any other top-level directory in ~/Downloads into
 # Folders/, except protected category folders (built-in, user-defined, and
 # dynamic). Directory symlinks are skipped (never followed).
-if ensure_category "Folders"; then
+if [ "$SKIP_DIRS" = "1" ]; then
+  log "skip: stray-folder sweep disabled (ORGANIZE_SKIP_DIRS=1)"
+elif ensure_category "Folders"; then
   for d in */; do
     refresh_lock
     name="${d%/}"
