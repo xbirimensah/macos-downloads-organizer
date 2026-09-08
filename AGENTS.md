@@ -12,7 +12,7 @@ No third-party deps.
 ## What this is
 
 Automatically sorts new files in `~/Downloads` into typed subfolders. Runs on
-file-system change (via `launchd` WatchPaths) and every 5 minutes as a safety
+change to the target folder (detected by the agent's own poller) and every 10 minutes as a safety
 net. Config-driven: users add folders and re-route extensions in
 `~/.config/organize-downloads/rules.conf`. A clickable `.app` also allows
 manual runs.
@@ -20,7 +20,7 @@ manual runs.
 Deliverables on disk after install:
 
 1. `~/bin/organize-downloads.sh` - the sorter script (the worker).
-2. `~/Applications/OrganizeDownloads.app` - AppleScript applet wrapping the
+2. `~/Applications/OrganizeDownloads.app` - signed Swift watcher agent running
    worker (manual trigger + TCC attribution).
 3. `~/Library/LaunchAgents/local.organize-downloads.plist` - launchd agent
    (rendered from `com.organize-downloads.plist.template`).
@@ -38,7 +38,8 @@ Deliverables on disk after install:
    `~/bin/`, and `~/Applications/`.
 2. The repo is already a working copy at some absolute path - let
    `REPO=$(pwd)` after `cd`-ing into it.
-3. `osacompile` and `launchctl` are on `PATH` (both ship with macOS).
+3. `swiftc`, `codesign`, `security` and `launchctl` are on `PATH` (Swift needs
+   the Command Line Tools; Xcode is not required).
 
 ## Install (happy path)
 
@@ -53,9 +54,10 @@ chmod +x ./install.sh
 1. Copy `organize-downloads.sh` -> `~/bin/organize-downloads.sh` (0700).
 2. Seed `~/.config/organize-downloads/rules.conf` from the repo's
    `rules.conf` if none exists.
-3. `osacompile` a one-line AppleScript into
-   `~/Applications/OrganizeDownloads.app` that runs the worker. An existing
-   applet that already wraps `~/bin/organize-downloads.sh` is KEPT: replacing
+3. Build and sign `~/Applications/OrganizeDownloads.app` from `agent/Sources`
+   via `agent/build.sh`, then register it with LaunchServices. Rebuilding is
+   cheap and safe because the signing identity is stable, so the designated
+   requirement does not change and existing TCC grants keep matching. Replacing
    the bundle resets its TCC grant and macOS would re-prompt for Downloads
    access.
 4. Render `com.organize-downloads.plist.template` into
@@ -102,7 +104,7 @@ The script is a config-driven rules engine (bash 3.2 compatible, so no
 associative arrays). See the reference implementation for the exact shape.
 
 - **Logging.** When stdout is not a terminal, the worker appends directly to
-  `~/Library/Logs/organize-downloads.log` / `.err` (AppleScript's
+  `~/Library/Logs/organize-downloads.log` / `.err` (the worker's
   `do shell script` swallows stdout, so launchd's StandardOutPath never sees
   worker output). Self-rotates at 5 MB to a single `.old` copy. Manual
   terminal runs print to the screen.
@@ -145,23 +147,44 @@ associative arrays). See the reference implementation for the exact shape.
 ## launchd plist
 
 - `Label`: `local.organize-downloads`
-- `ProgramArguments`: `__HOME__/Applications/OrganizeDownloads.app/Contents/MacOS/applet`
-  (so the AppleScript -> shell chain runs with proper TCC prompts).
-- `WatchPaths`: `["$HOME/Downloads"]` (substitute `__HOME__` at install time)
+- `ProgramArguments`: `__HOME__/Applications/OrganizeDownloads.app/Contents/MacOS/OrganizeDownloads`
+  (the app is the TCC identity; the worker inherits its grants as a child).
+- `KeepAlive`: `true` - one long-lived process, NOT a per-event relaunch.
+- No `WatchPaths`: the agent watches the target itself and re-arms across
+  volume eject/remount, which WatchPaths cannot do.
 - `ThrottleInterval`: `10` (seconds between triggers)
-- `StartInterval`: `300` (5-minute fallback sweep)
+- No `StartInterval`: the agent owns its own 10-minute fallback sweep.
 - `StandardOutPath` / `StandardErrorPath`:
   `~/Library/Logs/organize-downloads.log` / `.err` (backstop only; the worker
   writes the log itself, see Logging above)
 - `Umask`: `63` (octal 0077), `ProcessType`: `Background`, pinned system `PATH`.
 - Load with `launchctl bootstrap gui/$(id -u) <rendered-plist>`.
 
-## AppleScript applet
+## Watcher app
 
-Single line: `do shell script "$HOME/bin/organize-downloads.sh"` (resolved at
-install time). Save as Application via
-`osacompile -o ~/Applications/OrganizeDownloads.app`. User grants Downloads
-folder access (or Full Disk Access) on first run.
+A small Swift `LSUIElement` agent (`agent/Sources`) built and signed by
+`agent/build.sh`. It exists so macOS has a stable app identity to attach
+permission grants to, and so one long-lived process can hold them instead of
+re-negotiating on every run.
+
+Two properties are load-bearing and must not be changed casually:
+
+- `CFBundleIdentifier` (`local.organize-downloads`). Without it macOS cannot map
+  the executable back to its bundle, and TCC falls back to keying grants by
+  executable PATH. A Full Disk Access grant stored against the `.app` path is
+  then never consulted, and the app is reduced to per-folder consent prompts
+  that recur forever.
+- A stable signing identity. See README for why ad-hoc signing re-prompts.
+
+The agent polls the target's mtime every 3s, debounces 6s, and runs
+`~/bin/organize-downloads.sh` as a child via `posix_spawn`. TCC attributes the
+child's access to the responsible app, so the worker inherits the app's grants
+and needs none of its own.
+
+It links neither Foundation nor CoreFoundation (libc + Dispatch only), which
+keeps it at ~1.4MB RSS. FSEvents was removed deliberately: it never fires on an
+exFAT volume mounted through fskit, and where it works its head start is hidden
+behind the debounce.
 
 ## Verification steps for the agent
 

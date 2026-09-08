@@ -32,27 +32,44 @@ chmod +x install.sh
 - Copy `organize-downloads.sh` to `~/bin/` (0700).
 - Seed your personal rules file at `~/.config/organize-downloads/rules.conf`
   (never overwrites an existing one).
-- Compile a wrapper app at `~/Applications/OrganizeDownloads.app` via
-  `osacompile` (so macOS permission prompts say "OrganizeDownloads", not
-  "osascript").
+- Create a self-signed code-signing identity in your login keychain if one is
+  not already there (no Apple Developer account needed; see below for why it
+  matters), then build and sign the watcher app into
+  `~/Applications/OrganizeDownloads.app` and register it with LaunchServices.
 - Render the launchd plist into
   `~/Library/LaunchAgents/local.organize-downloads.plist` with your actual
   `$HOME` substituted, and `launchctl bootstrap` the agent.
 
 ### First-run permissions
 
-macOS will prompt for **Files and Folders -> Downloads** access the first time
-the agent runs. Grant it. If no prompt appears, open **System Settings ->
-Privacy & Security -> Files and Folders**, find `OrganizeDownloads`, and
-enable **Downloads Folder**.
+Open **System Settings -> Privacy & Security -> Full Disk Access**, click
+**+**, and add `~/Applications/OrganizeDownloads.app`. This is a one-time step.
+
+Strictly you only need the categories your target folder falls under (Downloads
+folder, or removable volumes if you organise an external drive), and macOS will
+prompt for those on first run. Full Disk Access simply means it never has to ask
+again if you later point it somewhere else.
+
+**Why the app is signed.** macOS records a permission grant alongside the app's
+designated requirement. Signed with a stable certificate that requirement is
+`identifier "..." and certificate root = H"..."`, which every future rebuild
+still satisfies. Signed ad-hoc it is a bare `cdhash`, so each rebuild looks like
+a different app and macOS starts prompting all over again. The identity is named
+by `$SIGN_IDENTITY`, or `~/.config/organize-downloads/sign-identity`, and should
+stay stable once you have installed once. `./install.sh identity` creates it
+without doing a full install.
 
 ## Use
 
-Drop files in `~/Downloads`. They move into the matching subfolder within
-seconds when the file-system watcher catches them; if a file is still inside
-the script's 5-second safety window, the hourly fallback sweep picks it up.
-Stray directories are gathered into `Folders/`, files with no extension into
-`Other/`.
+Drop files in the folder you are organising. They move into the matching
+subfolder about ten seconds later: the agent notices the change within 3s, waits
+6s for the folder to go quiet (so a still-downloading file is not grabbed
+mid-write), then sweeps. A 10-minute full sweep runs as a safety net. Stray
+directories are gathered into `Folders/`, files with no extension into `Other/`.
+
+By default the target is `~/Downloads`. To organise somewhere else, write the
+path to `~/.config/organize-downloads/target`, or set `$ORGANIZE_DL` for a
+single manual run.
 
 ```bash
 ./install.sh run          # manual sweep now

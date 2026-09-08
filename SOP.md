@@ -24,7 +24,7 @@ If you'd rather rebuild from scratch instead of using the shipped `install.sh`, 
 
 Claude will ask permission to:
 - Create `~/bin/organize-downloads.sh`
-- Run `osacompile` to build the app
+- Build and sign the watcher app (`agent/build.sh`)
 - Create the launchd plist
 - Run `launchctl bootstrap` to load the agent
 

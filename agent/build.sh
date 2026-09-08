@@ -8,7 +8,7 @@ set -euo pipefail
 
 BUNDLE_ID="local.organize-downloads"
 APP_NAME="OrganizeDownloads"
-SIGN_IDENTITY="${SIGN_IDENTITY:-Obiri Local Code Signing}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Downloads Organizer Local Signing}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="${1:-$here/build}"

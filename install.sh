@@ -47,7 +47,19 @@ BIN="$HOME/bin/organize-downloads.sh"             # installed worker copy
 APP="$HOME/Applications/OrganizeDownloads.app"    # FDA holder launchd runs (hidden)
 AGENT_SRC="$REPO/agent"                           # Swift sources + build.sh
 BUNDLE_ID="local.organize-downloads"              # must match agent/build.sh
-SIGN_IDENTITY="${SIGN_IDENTITY:-Obiri Local Code Signing}"
+# Name of the code-signing identity in the login keychain. Resolution order:
+#   1. $SIGN_IDENTITY
+#   2. ~/.config/organize-downloads/sign-identity
+#   3. the generic default below
+# Keep this stable once an install exists: renaming it makes ensure_identity
+# mint a DIFFERENT certificate, which changes the app's designated requirement
+# and resets its TCC grants. The config file exists so an existing install can
+# keep its original certificate name without that name living in the repo.
+SIGN_IDENTITY_FILE="$HOME/.config/organize-downloads/sign-identity"
+if [ -z "${SIGN_IDENTITY:-}" ] && [ -s "$SIGN_IDENTITY_FILE" ]; then
+  SIGN_IDENTITY="$(tr -d '\r\n' <"$SIGN_IDENTITY_FILE")"
+fi
+SIGN_IDENTITY="${SIGN_IDENTITY:-Downloads Organizer Local Signing}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 # render_plist
