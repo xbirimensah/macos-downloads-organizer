@@ -149,6 +149,31 @@ case "${1:-install}" in
 
     # Copy the worker into ~/bin (owner-only). This is a COPY: re-run install
     # after editing the repo script for the change to take effect.
+    #
+    # DRIFT GUARD. This copy once destroyed uncommitted work: changes had been
+    # made directly to the installed copy and never brought back here, so a
+    # routine install silently reverted the worker to an older version and it
+    # organised the wrong folder for days. Refuse to overwrite an installed
+    # worker that differs from this one AND is newer, since that is exactly the
+    # shape of "someone edited ~/bin and it was never synced back".
+    if [ -f "$BIN" ] && ! cmp -s "$REPO/organize-downloads.sh" "$BIN"; then
+      if [ "$BIN" -nt "$REPO/organize-downloads.sh" ] && [ "${FORCE:-0}" != "1" ]; then
+        echo "refusing to overwrite a newer installed worker."
+        echo
+        echo "  installed: $BIN"
+        echo "  repo:      $REPO/organize-downloads.sh"
+        echo
+        echo "The installed copy is newer and differs, so it probably carries"
+        echo "edits that were never brought back to the repo. Inspect them:"
+        echo
+        echo "  diff \"$REPO/organize-downloads.sh\" \"$BIN\""
+        echo
+        echo "Then either copy them back into the repo, or re-run with FORCE=1"
+        echo "to discard the installed copy."
+        exit 1
+      fi
+      echo "replacing installed worker (repo copy is newer)"
+    fi
     cp "$REPO/organize-downloads.sh" "$BIN"
     chmod 0700 "$BIN"
 
