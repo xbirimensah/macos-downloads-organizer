@@ -81,6 +81,16 @@ prefix Invoices RE-      # route by filename prefix instead
 
 Save, and the next run picks up your changes - no reload, no reinstall. Files whose type matches no rule get a folder named after their extension automatically (`report.stl` lands in `STL/`). The full syntax reference is in the comments of that file.
 
+## Sending a second folder to the same place
+
+If you organise an external drive but some apps (AirDrop, Telegram, Mail) still save into `~/Downloads`, point the relay at that folder:
+
+```
+echo "$HOME/Downloads" > ~/.config/organize-downloads/inbox
+```
+
+From then on anything that lands in `~/Downloads` is moved to the drive and sorted there within about ten seconds. Files still being written are left alone and picked up once they finish. If the drive is unplugged, files wait in `~/Downloads` until it is back.
+
 ## Troubleshooting
 
 | Symptom | Fix |

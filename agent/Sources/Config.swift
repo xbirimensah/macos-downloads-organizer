@@ -1,10 +1,14 @@
 import Darwin
 
-/// Resolved runtime configuration. Mirrors the worker's own target resolution
-/// (ORGANIZE_DL env > target file > ~/Downloads) so the agent and the script
-/// never disagree about which folder is being organised.
+/// Resolved runtime configuration. Mirrors the worker's own resolution rules
+/// (ORGANIZE_DL env > target file > ~/Downloads, and ORGANIZE_INBOX env >
+/// inbox file > none) so the agent and the script never disagree about which
+/// folders are being organised.
 struct Config {
     let targetPath: String
+    /// Optional second folder the worker drains into the target before every
+    /// sweep. nil when none is configured or it would equal the target.
+    let inboxPath: String?
     let workerPath: String
     let logPath: String
 
@@ -17,7 +21,7 @@ struct Config {
     /// would wait for the next periodic sweep instead.
     static let debounceSeconds = 6.0
 
-    /// How often the target's mtime is checked. One stat per tick.
+    /// How often each watched folder's mtime is checked. One stat per tick.
     static let pollIntervalSeconds = 3.0
 
     /// Slack given to the kernel to coalesce poll wakeups with other timers.
@@ -29,31 +33,67 @@ struct Config {
     static let sweepIntervalSeconds = 600.0
 
     /// How often to re-check whether the target exists. Drives re-arming the
-    /// poller when a removable volume is ejected and plugged back in.
+    /// pollers when a removable volume is ejected and plugged back in.
     static let supervisorIntervalSeconds = 30.0
 
     /// Cap before the agent log is rotated, matching the worker's own limit.
     static let maxLogBytes: off_t = 5 * 1024 * 1024
 
+    /// Exit status the worker uses to say it left entries behind that were
+    /// still being written. Not an error: the agent retries on a backoff.
+    static let workerDeferredExitCode: Int32 = 3
+
+    /// First retry delay after a deferred run, doubled per consecutive
+    /// deferral up to `retryMaxSeconds`. Bounds how long a file written in
+    /// place (no temp name, so no second mtime change on the folder) waits
+    /// after the writer finishes.
+    static let retryInitialSeconds = 15.0
+    static let retryMaxSeconds = 60.0
+
     static func resolve() -> Config {
         let home = Posix.homeDirectory()
+        let target = resolveTarget(home: home)
         return Config(
-            targetPath: resolveTarget(home: home),
+            targetPath: target,
+            inboxPath: resolveInbox(home: home, target: target),
             workerPath: "\(home)/bin/organize-downloads.sh",
             logPath: "\(home)/Library/Logs/organize-downloads-agent.log"
         )
     }
 
     private static func resolveTarget(home: String) -> String {
-        if let raw = getenv("ORGANIZE_DL") {
-            let value = String(cString: raw)
-            if !value.isEmpty { return value }
-        }
+        if let value = environmentValue("ORGANIZE_DL") { return value }
         if let raw = Posix.readSmallFile("\(home)/.config/organize-downloads/target") {
             let value = raw.trimmingASCIIWhitespace()
             if !value.isEmpty { return value }
         }
         return "\(home)/Downloads"
+    }
+
+    /// An env-overridden target never relays unless ORGANIZE_INBOX is also
+    /// given, matching the worker: a one-off run pointed somewhere else must
+    /// not drain ~/Downloads into it.
+    private static func resolveInbox(home: String, target: String) -> String? {
+        let raw: String?
+        if let env = getenv("ORGANIZE_INBOX") {
+            raw = String(cString: env)
+        } else if environmentValue("ORGANIZE_DL") != nil {
+            return nil
+        } else {
+            raw = Posix.readSmallFile("\(home)/.config/organize-downloads/inbox")
+        }
+        guard var path = raw?.trimmingASCIIWhitespace(), !path.isEmpty,
+              path != "off", path != "none"
+        else { return nil }
+        while path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+        return path == target ? nil : path
+    }
+
+    /// The variable's value, or nil when unset or empty.
+    private static func environmentValue(_ name: String) -> String? {
+        guard let raw = getenv(name) else { return nil }
+        let value = String(cString: raw)
+        return value.isEmpty ? nil : value
     }
 }
 

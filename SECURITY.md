@@ -28,6 +28,11 @@ write there. Assumed adversaries:
 7. **Symlink-deletion trickery** - the compat-link pruner removes
    symlinks; a planted symlink must not trick it into deleting anything
    but a link.
+8. **A hostile inbox path** - `~/.config/organize-downloads/inbox` names
+   a folder whose contents are moved into the target; it must not be able
+   to move the target into itself, or drain a folder the user does not own.
+9. **A truncated relay** - a cross-volume relay copies then deletes; a copy
+   that fails or is cut short must never cost the only copy of a file.
 
 **Out of scope:** arbitrary code running as the user (it already owns
 everything we can defend), macOS TCC bypass, physical access.
@@ -104,9 +109,12 @@ manually (not under launchd), new files still inherit tight perms.
 ### 9. No destructive operations on user data
 - Only `mv -n` is used on files. Collisions rename with a
   `dup_<epoch>_` prefix. Nothing is ever overwritten.
-- The ONLY `rm` in the script targets the compat symlinks described in
-  mitigation 3, plus `rmdir` on the (empty) lock directory. Auditable
-  by `grep -nE '\brm(dir)?\b' organize-downloads.sh`.
+- Every `rm` in the script is one of: the compat symlinks described in
+  mitigation 3; `rmdir` on the (empty) lock directory; the relay's own
+  `.relay-<pid>-*` temp copies; and the SOURCE of a cross-volume relay,
+  removed only after the copy has been verified and renamed into place
+  (mitigation 12). Auditable by
+  `grep -nE '\brm(dir)?\b' organize-downloads.sh`.
 
 ### 10. Shell hygiene
 - `set -u` catches unbound variables.
@@ -133,6 +141,31 @@ manually (not under launchd), new files still inherit tight perms.
 - Dynamic folder names are derived by stripping the extension to
   `[a-z0-9]` and uppercasing, capped at 12 chars; anything else falls
   back to the `other_to` folder.
+
+### 12. Relay is copy, verify, rename, then remove
+The optional inbox relay (`relay_inbox`) is the one path that deletes a
+user file, and only ever a verified duplicate:
+- The inbox path must be absolute, must not equal the target, must not
+  contain the target or sit inside it, and must be a real directory
+  (not a symlink) owned by the current user. Anything else is logged
+  and the relay is skipped; the sweep still runs.
+- An env-overridden target (`$ORGANIZE_DL`) never relays unless
+  `$ORGANIZE_INBOX` is set too, so a one-off run on some other folder
+  cannot drain `~/Downloads` into it.
+- Entries are relayed only when settled (nothing modified in the last 5
+  seconds, checked recursively for directories); symlinks, dotfiles and
+  partial-download names are never touched.
+- Same volume: a `mv -n` rename to a free name, nothing is copied.
+- Cross volume: `ditto` into `$DL/.relay-<pid>-<name>` (hidden, so a
+  half-written copy is never visible under its final name); the copy
+  must have the same regular-file count and total bytes as the source;
+  it is renamed into place with `mv -n`; only after that rename succeeds
+  is the source removed. A failed copy, a mismatch, or a declined rename
+  removes the temp and keeps the source. If the source removal fails,
+  both copies are kept and a warning is logged.
+- Abandoned temps are pruned only when the pid embedded in their name is
+  no longer alive, and their source is by construction still in the
+  inbox.
 
 ## Verification script
 
@@ -164,6 +197,24 @@ HOME="$TMP" bash "$SCRIPT" 2>&1 | tail -12
 [ -L "$TMP/Downloads/Images" ]              || { echo "FAIL: symlinked category was replaced"; exit 1; }
 [ -L "$TMP/Downloads/normal.pdf" ]          || { echo "FAIL: compat link missing"; exit 1; }
 echo OK
+
+# Relay: an inbox that is drained into the target, with the guards above.
+mkdir -p "$TMP/inbox"; cd "$TMP/inbox"
+touch -- "-rf.stl" "photo.png" "fresh.txt" "partial.crdownload"; ln -s /etc/hosts hosts-link.txt
+touch -t 202001010000 -- "-rf.stl" "photo.png" "partial.crdownload"
+HOME="$TMP" ORGANIZE_DL="$TMP/Downloads" ORGANIZE_INBOX="$TMP/inbox" bash "$SCRIPT"; rc=$?
+[ "$rc" = 3 ]                                || { echo "FAIL: fresh file should defer (exit 3), got $rc"; exit 1; }
+[ -f "$TMP/inbox/fresh.txt" ]                || { echo "FAIL: fresh file was relayed mid-write"; exit 1; }
+[ -f "$TMP/inbox/partial.crdownload" ]       || { echo "FAIL: partial download was relayed"; exit 1; }
+[ -L "$TMP/inbox/hosts-link.txt" ]           || { echo "FAIL: inbox symlink was relayed"; exit 1; }
+[ -f "$TMP/Downloads/Sane/-rf.stl" ]         || { echo "FAIL: dash name not relayed"; exit 1; }
+ls "$TMP/Downloads/Images"/dup_*_photo.png >/dev/null 2>&1 \
+                                             || { echo "FAIL: colliding relay not dup_-prefixed"; exit 1; }
+printf '%s\n' "$TMP/Downloads/PDFs" > "$TMP/.config/organize-downloads/inbox"
+HOME="$TMP" bash "$SCRIPT"
+grep -q "inbox is inside target" "$TMP/Library/Logs/organize-downloads.log" \
+                                             || { echo "FAIL: nested inbox not refused"; exit 1; }
+echo RELAY OK
 ```
 
 ## Known residual risks
@@ -183,3 +234,10 @@ echo OK
   category folder happen to straddle a mount point (unusual), a move
   becomes a copy-then-delete. Still never overwrites, but briefly
   exists in both places.
+- **Relayed files lose their quarantine flag on exFAT targets.** macOS
+  does not carry `com.apple.quarantine` onto an exFAT volume whatever
+  copy flags are used (tested with `ditto` with and without
+  `--noextattr` on macOS 26.6), so Gatekeeper's first-open check will
+  not fire for an app extracted from an archive that was relayed there.
+  Files a browser saves to that volume directly are subject to the same
+  limitation; it is a property of the volume, not of the relay.

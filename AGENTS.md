@@ -27,6 +27,9 @@ Deliverables on disk after install:
 4. `~/.config/organize-downloads/rules.conf` - user rules (seeded from the
    repo's `rules.conf`, never overwritten).
 5. Log files at `~/Library/Logs/organize-downloads.log` and `.err`.
+6. Optional: `~/.config/organize-downloads/inbox` - a second folder the
+   worker drains into the target before every sweep (user-written, never
+   created by install).
 
 ---
 
@@ -135,6 +138,25 @@ associative arrays). See the reference implementation for the exact shape.
   `compat_links on|off`.
 - Skip in-progress downloads (`*.crdownload`, `*.part`, `*.download`,
   `*.tmp`), dotfiles, symlinks, and files modified in the last 5 seconds.
+- **Deferred exit.** Every settle-guard skip (a file or folder modified in
+  the last 5 seconds) sets `DEFERRED=1`; the script exits 3 at the end
+  instead of 0. Not an error: the agent treats 3 as "retry in 15s, doubling
+  to 60s" so an in-place writer is picked up soon after it finishes.
+- **Inbox relay (optional).** Resolution, first match wins: `$ORGANIZE_INBOX`
+  if set (even empty; `off`/`none`/empty disable) > none when `$ORGANIZE_DL`
+  is set > `~/.config/organize-downloads/inbox` > none. Pre-flight: absolute
+  path, not the target, not nested inside it or containing it, a real
+  user-owned directory. Runs before the compat-link prune and the sweep, on
+  every settled top-level entry of the inbox that is not a dotfile, symlink
+  or partial download (for a directory, settled means nothing inside it was
+  modified in the last 5s, via `find -mtime -5s`). Same volume (`stat -f %d`
+  equal): `mv -n` to a free name. Cross volume: `ditto --norsrc --noextattr
+  --noacl` into `$DL/.relay-<pid>-<name>`, refreshing the lock while it
+  runs; compare `<regular-file count> <total bytes>` of source and copy
+  (ignoring `._*` sidecars, which exFAT adds on its own); `mv -n` to a free
+  name; then `rm -rf` the source. Any failure removes the temp and keeps the
+  source. At relay start, prune `.relay-<pid>-*` temps whose pid is dead.
+  Log lines: `relayed: X -> <target>/`, `relayed (dup): X -> <target>/Y`.
 - On name collision, rename to `dup_<epoch>_<orig>` (never overwrite; `mv -n`).
 - Folders are created on demand (`mkdir -m 0700`), not pre-created.
 - After file routing, move any remaining top-level **directory** into
@@ -179,7 +201,11 @@ Two properties are load-bearing and must not be changed casually:
 The agent polls the target's mtime every 3s, debounces 6s, and runs
 `~/bin/organize-downloads.sh` as a child via `posix_spawn`. TCC attributes the
 child's access to the responsible app, so the worker inherits the app's grants
-and needs none of its own.
+and needs none of its own. It resolves the inbox by the same rules as the
+worker, polls it with a second identical poller (only while the target is
+reachable), and always passes both `ORGANIZE_DL` and `ORGANIZE_INBOX` to the
+child. A worker exit of 3 schedules a retry run after 15s, doubling per
+consecutive deferral to a 60s cap, reset by any run that exits 0.
 
 It links neither Foundation nor CoreFoundation (libc + Dispatch only), which
 keeps it at ~1.4MB RSS. FSEvents was removed deliberately: it never fires on an
@@ -200,16 +226,21 @@ behind the debounce.
    `launchctl print gui/$(id -u)/local.organize-downloads` should show the
    service.
 5. Add a file to `~/Downloads`; within ~10s the log should record the run.
-   A too-fresh file may instead wait for the next trigger or the 5-minute
-   fallback sweep because of the 5-second mtime grace period.
-6. Run the adversarial verification script in `SECURITY.md`.
+   A too-fresh file is retried by the agent within 15-60s (worker exit 3).
+6. Relay: write a second folder's path to
+   `~/.config/organize-downloads/inbox`, drop a backdated file there, run
+   once; the log shows `relayed: <name> -> <target>/` followed by the usual
+   `moved:` line, and the inbox no longer holds the file.
+7. Run the adversarial verification script in `SECURITY.md`.
 
 ## Constraints
 
-- Do NOT delete user files, ever. Only move (`mv -n`). The single exception:
-  the script may remove the hidden browser-compat symlinks it created itself
-  (and rotate its own log). Anything beyond that is a regression, tested for
-  in `SECURITY.md`.
+- Do NOT delete user files, ever. Only move (`mv -n`). The exceptions: the
+  script may remove the hidden browser-compat symlinks and the abandoned
+  `.relay-*` temps it created itself, rotate its own log, and remove the
+  source of a cross-volume relay only after the copy has been verified and
+  renamed into place. Anything beyond that is a regression, tested for in
+  `SECURITY.md`.
 - Do NOT touch files matching in-progress-download patterns or dotfiles.
 - Do NOT recurse into existing subfolders; operate only on the top level of
   `~/Downloads`.

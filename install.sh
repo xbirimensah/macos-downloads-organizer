@@ -243,6 +243,12 @@ case "${1:-install}" in
     echo "Later rebuilds keep the grant (stable signing identity), so this is"
     echo "a one-time step. If an OLD entry for this app is already listed,"
     echo "remove it with - first: it is bound to a signature that no longer exists."
+    INBOX_FILE="$HOME/.config/organize-downloads/inbox"
+    if [ -s "$INBOX_FILE" ]; then
+      echo "relay: $(tr -d '\n' <"$INBOX_FILE") -> $TARGET (drained into the target before every sweep)"
+    else
+      echo "relay: off (write a folder path to $INBOX_FILE to drain it into the target)"
+    fi
     echo "logs: ~/Library/Logs/organize-downloads.log (worker)"
     echo "      ~/Library/Logs/organize-downloads-agent.log (watcher)"
     ;;

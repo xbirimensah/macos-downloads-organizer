@@ -17,6 +17,9 @@ Highlights:
   the old path and cleaned up automatically a few days later.
 - **Hardened.** Hostile filenames, planted symlinks, and concurrent runs are
   all handled. See `SECURITY.md` for the threat model.
+- **Relay.** Organising an external drive while some apps still save to
+  `~/Downloads`? Name it as the inbox and everything that lands there is moved
+  to the drive and sorted with the rest.
 
 ## Install
 
@@ -72,10 +75,40 @@ path to `~/.config/organize-downloads/target`, or set `$ORGANIZE_DL` for a
 single manual run.
 
 ```bash
-./install.sh run          # manual sweep now
+./install.sh run          # manual sweep now (exit 3 = skipped entries still being written)
 ./install.sh status       # is the agent loaded?
 tail -f ~/Library/Logs/organize-downloads.log
 ```
+
+### Relay a second folder into the target
+
+If browsers save straight to an external volume but AirDrop, chat clients and
+Mail still drop into `~/Downloads`, tell the organizer to drain that folder
+into the target before every sweep:
+
+```bash
+echo "$HOME/Downloads" > ~/.config/organize-downloads/inbox
+```
+
+Anything that lands at the top level of the inbox is moved to the target and
+sorted like everything else, within about ten seconds. On the same volume the
+move is a rename. Across volumes the entry is copied under a hidden temporary
+name, the copy's size and file count are checked against the source, it is
+renamed into place, and only then is the source removed. In-progress downloads
+(`.crdownload`, `.part`, `.download`, `.tmp`), symlinks and dotfiles are left
+alone; name collisions in the target get the usual `dup_<epoch>_` prefix.
+
+A file being written in place with no temporary name (some chat clients save
+this way) is skipped while it is still changing and polled back on a 15s to 60s
+backoff, so it follows within a minute of the write finishing. If the target's
+volume is unplugged the inbox simply accumulates and is drained when the volume
+returns.
+
+`ORGANIZE_INBOX=<path>` overrides the file for one run and `ORGANIZE_INBOX=off`
+disables it. A run whose target was set with `$ORGANIZE_DL` never relays unless
+`$ORGANIZE_INBOX` is given as well, so a one-off sweep of some other folder
+cannot drain `~/Downloads` into it. Write `off` to the inbox file, or delete
+it, to turn the relay off for good.
 
 npm wrappers exist for the same things: `npm run setup | teardown | run |
 status | logs | load | unload | reload | dashboard`.
@@ -163,8 +196,10 @@ not want them.
 ## What it never does
 
 - **Never deletes your files.** Only `mv -n` with a `dup_<epoch>_` prefix on
-  collision. The only deletions ever performed are of the hidden
-  browser-compat symlinks the organizer itself created.
+  collision. The deletions it does perform are of its own artifacts (the hidden
+  browser-compat symlinks, abandoned relay temp copies) and, for a cross-volume
+  relay, of the source after the copy's size and file count have been checked
+  against it.
 - **Never touches in-progress downloads** (`.crdownload`, `.part`,
   `.download`, `.tmp`), dotfiles, or files modified in the last 5 seconds.
 - **Never follows symlinks.** Symlinked source files or category folders are

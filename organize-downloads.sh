@@ -45,19 +45,30 @@
 #
 # Never deletes user files. Files move with `mv -n` exclusively; on collision,
 # renames with a `dup_<epoch>_` prefix. The only things ever removed are the
-# compat symlinks this script itself created.
+# compat symlinks this script itself created, its own abandoned relay temps,
+# and the SOURCE of a cross-volume relay once the copy has been verified
+# (see "Relay" below).
+#
+# Relay (optional):
+#   A second folder, the inbox, is drained into the target before each
+#   sweep. This covers the setup where browsers save straight to an external
+#   volume while AirDrop, chat clients and Mail still drop into ~/Downloads:
+#   whatever lands in the inbox is moved to the target, then sorted like
+#   everything else. Configured by ~/.config/organize-downloads/inbox or
+#   $ORGANIZE_INBOX. Same-volume relays are a rename; cross-volume relays
+#   copy to a hidden temp name, verify, rename into place, then remove the
+#   source.
 #
 # How it runs:
-#   This script is the worker. It is invoked (via the OrganizeDownloads.app
-#   AppleScript wrapper) by a launchd agent which watches `~/Downloads` for
-#   file-system changes (WatchPaths) and also sweeps every 5 minutes
-#   (StartInterval) as a fallback. See install.sh and
-#   com.organize-downloads.plist.template. Safe to run by hand as a one-off.
+#   This script is the worker. OrganizeDownloads.app (a persistent launchd
+#   agent, see agent/) polls the target and the inbox and runs this script
+#   as a child on change and every 10 minutes. Safe to run by hand.
 #
 # Exit policy:
-#   Every failure path exits 0 ("nothing to do" rather than "error") so
-#   launchd never treats a run as a crash and throttles the agent. The job
-#   is best-effort and idempotent.
+#   Every failure path exits 0 ("nothing to do" rather than "error"); the job
+#   is best-effort and idempotent. Exit 3 is not a failure: some entries were
+#   skipped because they were still being written, and the agent polls them
+#   back with a short retry instead of waiting for the next sweep.
 
 # Fail on use of unset variables; do NOT abort on individual command errors
 # (a single failing mv should skip one file, not kill the whole sweep).
@@ -80,12 +91,40 @@ else
   DL="$HOME/Downloads"
 fi
 
+# The inbox: a second folder whose top-level entries are relayed into $DL
+# before the sweep (see the header). Resolution order, first match wins:
+#   1. $ORGANIZE_INBOX                     - explicit; "off" or "" disables
+#   2. none, when $ORGANIZE_DL is set      - an env-overridden target never
+#                                            relays unless told to, so a
+#                                            one-off run on ~/Documents cannot
+#                                            drain ~/Downloads into it
+#   3. ~/.config/organize-downloads/inbox  - the persistent choice
+#   4. none
+INBOX_FILE="$HOME/.config/organize-downloads/inbox"
+if [ -n "${ORGANIZE_INBOX+set}" ]; then
+  INBOX="$ORGANIZE_INBOX"
+elif [ -n "${ORGANIZE_DL:-}" ]; then
+  INBOX=""
+elif [ -s "$INBOX_FILE" ]; then
+  INBOX="$(tr -d '\r\n' <"$INBOX_FILE")"
+else
+  INBOX=""
+fi
+case "$INBOX" in off|none) INBOX="" ;; esac
+
 # ORGANIZE_SKIP_DIRS=1 disables the stray-folder sweep. Needed when pointing
 # the worker at a folder that already has a deliberate subfolder layout of its
 # own (~/Documents, say), which the sweep would otherwise rake into Folders/.
 SKIP_DIRS="${ORGANIZE_SKIP_DIRS:-0}"
 LOCK_DIR="$HOME/Library/Caches/organize-downloads.lock" # single-instance lock
 UID_ME="$(id -u)"                                       # current user's numeric UID
+
+SETTLE_SECONDS=5            # entries modified more recently than this are left alone
+EXIT_DEFERRED=3             # exit status: the settle guard left work for a retry
+RELAY_TMP_PREFIX=".relay-"  # in-flight cross-volume copies: .relay-<pid>-<name>
+DEFERRED=0                  # set once anything is skipped as still being written
+RELAY_SAME_VOLUME=0
+RELAY_RESULT=""
 
 CONF_DIR="$HOME/.config/organize-downloads"   # user config + state
 CONF="$CONF_DIR/rules.conf"                   # user rule overrides (optional)
@@ -329,7 +368,7 @@ case "$COMPAT_OVERRIDE" in
   *) log "rules: bad ORGANIZE_COMPAT value '$COMPAT_OVERRIDE'" ;;
 esac
 
-log "target: $DL (skip_dirs=$SKIP_DIRS compat_links=$COMPAT_LINKS)"
+log "target: $DL (inbox=${INBOX:-none} skip_dirs=$SKIP_DIRS compat_links=$COMPAT_LINKS)"
 
 cd -- "$DL" || { log "abort: cd $DL failed"; exit 0; }
 
@@ -363,6 +402,174 @@ ensure_category() {
 
 # Make unmatched globs expand to nothing rather than the literal pattern.
 shopt -s nullglob
+
+# ---------------------------------------------------------------------------
+# Relay: drain the top level of $INBOX into $DL so the sweep below sorts it
+# like anything that landed in $DL directly. On the same volume a relay is a
+# rename. Across volumes it is copy -> verify -> rename into place -> remove
+# the source, with the copy under a hidden temp name so nothing half-written
+# is ever visible under its final name. Removing the source is the one place
+# this script deletes a user file, and only ever a verified duplicate.
+
+# is_settled PATH
+# True unless PATH (or, for a directory, anything inside it) changed within
+# the last SETTLE_SECONDS. An app that writes in place with no temp-name
+# convention may still be mid-write; leave it and ask for a retry.
+is_settled() {
+  local p="$1" mtime
+  if [ -d "$p" ]; then
+    [ -z "$(find "$p" -mtime "-${SETTLE_SECONDS}s" -print -quit 2>/dev/null)" ] && return 0
+  else
+    mtime="$(stat -f %m -- "$p" 2>/dev/null || echo 0)"
+    [ "$mtime" -gt 0 ] && [ "$(( $(date +%s) - mtime ))" -ge "$SETTLE_SECONDS" ] && return 0
+  fi
+  DEFERRED=1
+  return 1
+}
+
+# tree_sig PATH
+# "<regular file count> <total bytes>" for a file or a directory tree.
+# AppleDouble "._*" sidecars are ignored: exFAT volumes add them on their own
+# and they would make every verified copy look different from its source.
+tree_sig() {
+  if [ -d "$1" ]; then
+    find "$1" -type f ! -name '._*' -exec stat -f %z -- {} + 2>/dev/null \
+      | awk '{ n++; s += $1 } END { printf "%d %d", n + 0, s + 0 }'
+  else
+    stat -f '1 %z' -- "$1" 2>/dev/null || printf '0 0'
+  fi
+}
+
+# free_name NAME
+# NAME if nothing in $DL has it, else a dup_<epoch>_ prefixed variant.
+free_name() {
+  if [ -e "$DL/$1" ] || [ -L "$DL/$1" ]; then
+    printf 'dup_%s_%s' "$(date +%s)" "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# prune_relay_temps
+# In-flight copies are named .relay-<pid>-<name>. One whose pid is gone was
+# abandoned by a run that died mid-copy; its source is still in the inbox,
+# so the temp is a partial duplicate and never the only copy.
+prune_relay_temps() {
+  local t rest pid
+  for t in "$DL/$RELAY_TMP_PREFIX"*; do
+    [ -e "$t" ] || [ -L "$t" ] || continue
+    rest="${t##*/}"
+    rest="${rest#"$RELAY_TMP_PREFIX"}"
+    pid="${rest%%-*}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null && continue
+    rm -rf -- "$t" && log "pruned abandoned relay copy: ${t##*/}"
+  done
+}
+
+# relay_copy NAME DEST
+# Cross-volume relay of $INBOX/NAME to $DL/DEST; sets RELAY_RESULT to the
+# final name. The lock is refreshed while the copy runs so a large file
+# cannot outlive the stale-lock window.
+relay_copy() {
+  local name="$1" dest="$2" src tmp pid rc
+  src="$INBOX/$name"
+  tmp="$DL/$RELAY_TMP_PREFIX$$-$dest"
+  ditto --norsrc --noextattr --noacl -- "$src" "$tmp" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.25
+    refresh_lock
+  done
+  wait "$pid"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -rf -- "$tmp"
+    log "relay copy failed (exit $rc): $name (source kept)"
+    return 1
+  fi
+  if [ "$(tree_sig "$src")" != "$(tree_sig "$tmp")" ]; then
+    rm -rf -- "$tmp"
+    log "relay verify failed: $name (source kept)"
+    return 1
+  fi
+  dest="$(free_name "$dest")"
+  mv -n -- "$tmp" "$DL/$dest" || { rm -rf -- "$tmp"; log "relay rename failed: $name (source kept)"; return 1; }
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    rm -rf -- "$tmp"
+    log "relay rename declined: $name (source kept)"
+    return 1
+  fi
+  rm -rf -- "$src"
+  if [ -e "$src" ] || [ -L "$src" ]; then
+    log "warn: relayed $name but its source could not be removed (both copies exist)"
+  fi
+  RELAY_RESULT="$dest"
+  return 0
+}
+
+# relay_one NAME
+relay_one() {
+  local name="$1" dest
+  dest="$(free_name "$name")"
+  if [ "$RELAY_SAME_VOLUME" = 1 ]; then
+    mv -n -- "$INBOX/$name" "$DL/$dest" || { log "relay mv failed: $name"; return 1; }
+    if [ -e "$INBOX/$name" ] || [ -L "$INBOX/$name" ]; then
+      log "skip: relay move declined for $name"
+      return 1
+    fi
+  else
+    RELAY_RESULT=""
+    relay_copy "$name" "$dest" || return 1
+    dest="$RELAY_RESULT"
+  fi
+  if [ "$dest" = "$name" ]; then
+    log "relayed: $name -> $DL/"
+  else
+    log "relayed (dup): $name -> $DL/$dest"
+  fi
+  return 0
+}
+
+# relay_inbox
+# Pre-flight the inbox with the same suspicion as the target, then relay
+# every settled top-level entry. Symlinks are never followed or moved.
+relay_inbox() {
+  local entry name
+  [ -n "$INBOX" ] || return 0
+  INBOX="${INBOX%/}"
+  case "$INBOX" in /*) ;; *) log "relay: inbox must be an absolute path: $INBOX"; return 0 ;; esac
+  if [ "$INBOX" = "$DL" ]; then
+    log "relay: inbox is the target, nothing to relay"
+    return 0
+  fi
+  case "$DL/" in "$INBOX"/*) log "relay: refusing, target is inside inbox"; return 0 ;; esac
+  case "$INBOX/" in "$DL"/*) log "relay: refusing, inbox is inside target"; return 0 ;; esac
+  if [ -L "$INBOX" ] || [ ! -d "$INBOX" ]; then
+    log "relay: inbox missing or a symlink: $INBOX"
+    return 0
+  fi
+  if [ "$(stat -f %u -- "$INBOX" 2>/dev/null)" != "$UID_ME" ]; then
+    log "relay: inbox not owned by current user: $INBOX"
+    return 0
+  fi
+  if [ "$(stat -f %d -- "$INBOX" 2>/dev/null)" = "$(stat -f %d -- "$DL" 2>/dev/null)" ]; then
+    RELAY_SAME_VOLUME=1
+  else
+    RELAY_SAME_VOLUME=0
+  fi
+  prune_relay_temps
+  for entry in "$INBOX"/*; do
+    refresh_lock
+    name="${entry##*/}"
+    [ -e "$entry" ] || continue
+    [ -L "$entry" ] && continue
+    case "$name" in *.crdownload|*.part|*.download|*.tmp) continue ;; esac
+    is_settled "$entry" || continue
+    relay_one "$name"
+  done
+}
+relay_inbox
 
 # ---------------------------------------------------------------------------
 # Prune compat symlinks. Only symlinks THIS script plausibly created are
@@ -502,11 +709,14 @@ for f in *; do
   case "$f" in
     *.crdownload|*.part|*.download|*.tmp) continue ;;
   esac
-  # Grace period: a file modified in the last 5s may still be being written
-  # by an app that does not use a temp-name convention.
+  # Grace period: a file modified in the last SETTLE_SECONDS may still be
+  # being written by an app that does not use a temp-name convention.
   mtime="$(stat -f %m -- "$f" 2>/dev/null || echo 0)"
   [ "$mtime" -gt 0 ] || continue
-  [ "$(( now_epoch - mtime ))" -lt 5 ] && continue
+  if [ "$(( now_epoch - mtime ))" -lt "$SETTLE_SECONDS" ]; then
+    DEFERRED=1
+    continue
+  fi
 
   cat="$(category_for_prefix "$f")"
   if [ -z "$cat" ]; then
@@ -545,9 +755,10 @@ elif ensure_category "Folders"; then
     [ -L "$name" ] && { log "skip dir symlink: $name"; continue; }
     mtime="$(stat -f %m -- "$name" 2>/dev/null || echo 0)"
     [ "$mtime" -gt 0 ] || continue
-    # Grace period: don't grab a folder modified in the last 5s; it may still
-    # be mid-extraction (e.g. an unzipping archive) and not yet complete.
-    if [ "$(( $(date +%s) - mtime ))" -lt 5 ]; then
+    # Grace period: don't grab a folder modified in the last SETTLE_SECONDS;
+    # it may still be mid-extraction (an unzipping archive) and incomplete.
+    if [ "$(( $(date +%s) - mtime ))" -lt "$SETTLE_SECONDS" ]; then
+      DEFERRED=1
       continue
     fi
     move_dir_one "Folders" "$name"
@@ -555,3 +766,13 @@ elif ensure_category "Folders"; then
 else
   log "skip: Folders/ not a safe destination"
 fi
+
+# ---------------------------------------------------------------------------
+# Anything skipped for still being written is reported to the agent through
+# the exit status so it can poll back soon instead of waiting for the next
+# periodic sweep. Not an error.
+if [ "$DEFERRED" = 1 ]; then
+  log "deferred: entries still being written were left for a retry"
+  exit "$EXIT_DEFERRED"
+fi
+exit 0

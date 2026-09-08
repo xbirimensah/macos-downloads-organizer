@@ -17,6 +17,10 @@ final class WorkerRunner {
     private let queue = DispatchQueue(label: "local.organize-downloads.worker")
     private var isRunning = false
 
+    /// Called with the worker's exit status after every completed run, on the
+    /// worker queue. Runs that never launched do not report.
+    var onExit: ((Int32) -> Void)?
+
     init(config: Config, log: Log) {
         self.config = config
         self.log = log
@@ -76,13 +80,14 @@ final class WorkerRunner {
         while waitpid(pid, &exitStatus, 0) == -1 && errno == EINTR { continue }
 
         let code = (exitStatus & 0x7f) == 0 ? (exitStatus >> 8) & 0xff : -1
-        if code != 0 {
+        if code != 0 && code != Config.workerDeferredExitCode {
             log.write("worker exited \(code) (\(reason))")
         }
         let trimmed = stderrTail.trimmingASCIIWhitespace()
         if !trimmed.isEmpty {
             log.write("worker stderr: \(trimmed)")
         }
+        onExit?(code)
     }
 
     /// Reads the pipe to EOF, retaining only the final `maxCapturedStderr`
@@ -102,17 +107,22 @@ final class WorkerRunner {
         return String(decoding: kept, as: UTF8.self)
     }
 
-    /// The current environment with ORGANIZE_DL forced to the resolved target,
-    /// so the worker cannot disagree with the agent about what to organise.
+    /// The current environment with ORGANIZE_DL and ORGANIZE_INBOX forced to
+    /// the resolved values, so the worker cannot disagree with the agent about
+    /// what to organise. The inbox is always stated: the worker treats an env
+    /// target with no env inbox as "do not relay", so silence would disable it.
     private func childEnvironment() -> [String] {
         var result: [String] = []
         var index = 0
         while let entry = environ[index] {
             let text = String(cString: entry)
-            if !text.hasPrefix("ORGANIZE_DL=") { result.append(text) }
+            if !text.hasPrefix("ORGANIZE_DL=") && !text.hasPrefix("ORGANIZE_INBOX=") {
+                result.append(text)
+            }
             index += 1
         }
         result.append("ORGANIZE_DL=\(config.targetPath)")
+        result.append("ORGANIZE_INBOX=\(config.inboxPath ?? "off")")
         return result
     }
 }
