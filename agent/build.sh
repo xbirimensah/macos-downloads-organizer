@@ -47,11 +47,15 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "compiling..."
-swiftc -O -swift-version 5 \
+# -Osize over -O: this is an idle daemon, so a smaller text segment (fewer
+# pages faulted in and kept resident) is worth more than inlining.
+# -dead_strip drops anything the linker can prove is unreachable.
+swiftc -Osize -swift-version 5 \
+	-Xlinker -dead_strip \
 	-o "$app/Contents/MacOS/$APP_NAME" \
+	"$here/Sources/Posix.swift" \
 	"$here/Sources/Config.swift" \
-	"$here/Sources/Logger.swift" \
-	"$here/Sources/FolderWatcher.swift" \
+	"$here/Sources/Log.swift" \
 	"$here/Sources/DirectoryPoller.swift" \
 	"$here/Sources/WorkerRunner.swift" \
 	"$here/Sources/main.swift"
